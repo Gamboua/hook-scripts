@@ -1,48 +1,129 @@
-#!/usr/bin/python
-#################
-# Author: Gabriel Pimenta
-# Email: gamboua@gmail.com
+#!/bin/sh
 #
-# This Hook Script is used to forbidd files by the extension.
-# 
-#################
+# An example hook script to blocks unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
 
-import sys
-import os
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+retorno=$(python custom_hooks/files.py $1 $2 $3)
+if [ $? -ne 0 ]; then
+    echo "$retorno" >&2
+    exit 1
+fi
 
-zero = "0000000000000000000000000000000000000000"
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+    echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+    exit 1
+fi
 
-# Please, set a list of forbidden extensions
-extensions=['.zip']
+# --- Config
+allowunannotated=$(git config --bool hooks.allowunannotated)
+allowdeletebranch=$(git config --bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --bool hooks.denycreatebranch)
+allowdeletetag=$(git config --bool hooks.allowdeletetag)
+allowmodifytag=$(git config --bool hooks.allowmodifytag)
 
-args=sys.argv
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero="0000000000000000000000000000000000000000"
+if [ "$newrev" = "$zero" ]; then
+    newrev_type=delete
+else
+    newrev_type=$(git cat-file -t $newrev)
+fi
 
-# check if is a new branch
-if args[2] == zero:
-    # Get the HEAD commit on master
-    # When a new branch comes, the old_ref variable is equals to zero and the git diff-tree commmand will failure.
-    # If we set just the new_ref variable, the command output could not bring files from older commits.
-    # So, if we create a new branch, and push it with 2 commits, if the older commit have a forbidden file, the command
-    # won't works.
-    master_hash = "git log -n 1 master --pretty=format:\"%H\""
-    f = os.popen(master_hash)
-    master_hash = f.read()
+case "$refname","$newrev_type" in
+    refs/tags/*,commit)
+        # un-annotated tag
+        short_refname=${refname##refs/tags/}
+        retorno=$(python custom_hooks/vec.py $short_refname)
+        if [ $? -ne 0 ]; then
+          #if [ "$allowunannotated" != "true" ]; then
+          #  echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+          #  echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+          #  exit 1
+          #fi
+            echo "$retorno" >&2
+            exit 1
+        fi
+        ;;
+    refs/tags/*,delete)
+        # delete tag
+        if [ "$allowdeletetag" != "true" ]; then
+            echo "*** Deleting a tag is not allowed in this repository" >&2
+            exit 1
+        fi
+        ;;
+    refs/tags/*,tag)
+        # annotated tag
+        short_refname=${refname##refs/tags/}
+        retorno=$(python custom_hooks/vec.py $short_refname)
+        if [ $? -eq 0 ]; then
+              if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+              then
+                  echo "*** Tag '$refname' already exists." >&2
+                  echo "*** Modifying a tag is not allowed in this repository." >&2
+                  exit 1
+              fi
+        else
+          echo "$retorno" >&2
+          exit 1
+        fi
+        ;;
+    refs/heads/*,commit)
+        # branch
+        if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+            echo "*** Creating a branch is not allowed in this repository" >&2
+            exit 1
+        fi
+        ;;
+    refs/heads/*,delete)
+        # delete branch
+        if [ "$allowdeletebranch" != "true" ]; then
+            echo "*** Deleting a branch is not allowed in this repository" >&2
+            exit 1
+        fi
+        ;;
+    refs/remotes/*,commit)
+        # tracking branch
+        ;;
+    refs/remotes/*,delete)
+        # delete tracking branch
+        if [ "$allowdeletebranch" != "true" ]; then
+            echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        # Anything else (is there anything else?)
+        echo "$refname $oldrev $newrev" >&2
+        echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+        exit 1
+        ;;
+esac
 
-    # prepare parameters when new branch comes
-    parametros="%s %s" % (master_hash, args[3])
-else:
-    # prepare parameters to an existing branch push
-    parametros="%s %s" % (args[2], args[3])
-
-# get the files list from commit
-command = "git diff-tree --no-commit-id --name-only -r %s" % parametros
-f = os.popen(command)
-now = f.read()
-
-for i in now.split("\n"):
-    for ex in extensions:
-        # check the extension on commit files
-        if i[-len(ex):] == ex:
-            print "Arquivo %s com extensao %s nao permitido" % (i, ex)
-            exit(1)
-exit(0)
+# --- Finished
+exit 0
